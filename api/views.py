@@ -1,6 +1,7 @@
 import math
 
 from django.contrib.auth.hashers import check_password
+from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -37,6 +38,7 @@ def upload_data(request):
         accuracy=data['accuracy'],
         is_baseline=False,
         custom_user=user,
+        test_time=timezone.now(),
     )
     for i in range(0, 5):
         gpu_id = "cuda:" + str(i)
@@ -120,10 +122,10 @@ def get_hardware_data(request):
     test_result_id = request.data.get('test_result_id')
     item = TestResult.objects.get(id=test_result_id)
     data = {}
-    hardware_data = HardwareData.objects.get(test_result=item.id)
+    hardware_data = HardwareData.objects.filter(test_result=item.id)
     data['id'] = item.id
     data['model_name'] = item.model_name
-    data['hardware_name'] = hardware_data.gpu_name
+    data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
     data['avg_utilization'] = hardware_data.avg_utilization
     data['avg_memory'] = hardware_data.avg_memory
     data['energy_per_query'] = round(hardware_data.total_energy / item.sample_number, 2)
@@ -142,11 +144,11 @@ def get_model_data(request):
     item = TestResult.objects.get(id=test_result_id)
 
     data = {}
-    hardware_data = HardwareData.objects.get(test_result=item.id)
+    hardware_data = HardwareData.objects.filter(test_result=item.id)
     model_data = ModelData.objects.get(test_result=item.id)
     data['id'] = item.id
     data['model_name'] = item.model_name
-    data['hardware_name'] = hardware_data.gpu_name
+    data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
     data['avg_vision_tim'] = model_data.avg_vision_time
     data['avg_align_time'] = model_data.avg_align_time
     data['avg_text_gen_time'] = model_data.avg_text_gen_time
@@ -173,10 +175,10 @@ def get_mode_data(request):
     item = TestResult.objects.get(id=test_result_id)
 
     data = {}
-    hardware_data = HardwareData.objects.get(test_result=item.id)
+    hardware_data = HardwareData.objects.filter(test_result=item.id)
     data['id'] = item.id
     data['model_name'] = item.model_name
-    data['hardware_name'] = hardware_data.gpu_name
+    data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
     data['accuracy'] = item.accuracy
     if item.test_mode == "Offline":
         offline_data = OfflineData.objects.get(test_result=item.id)
@@ -236,7 +238,7 @@ def get_score_suggestion(request):
         base_hardware_data = HardwareData.objects.get(test_result=2+temp)
         base_model_data = ModelData.objects.get(test_result=2+temp)
         base_test = TestResult.objects.get(id=2+temp)
-        score = 60+10*math.log2(server_data.samples_per_second/base_server.samples_per_second)
+        score = 60+10*math.log2(server_data.samples_per_second/base_server.samples_per_second)+10*math.log2(base_server.avg_first_token_latency/server_data.avg_first_token_latency)
     elif test_result.test_mode == "SingleStream":
         single_stream_data = SingleStreamData.objects.get(test_result=test_result_id)
         base_single_stream = SingleStreamData.objects.get(test_result=3+temp)
@@ -253,16 +255,21 @@ def get_score_suggestion(request):
         score = 60+10*math.log2(multi_stream_data.stream_num/base_multi_stream.stream_num)
 
     suggestion = ''
-    hardware_data = HardwareData.objects.get(test_result=test_result_id)
+    hardware_tmp = HardwareData.objects.filter(test_result=test_result_id)
+    hardware_data = {}
+    hardware_data['avg_utilization'] = sum(obj.avg_utilization for obj in hardware_tmp) / len(hardware_tmp)
+    hardware_data['avg_memory'] = sum(obj.avg_memory for obj in hardware_tmp)
+    hardware_data['total_energy'] = sum(obj.total_energy for obj in hardware_tmp)
+
     model_data = ModelData.objects.get(test_result=test_result_id)
     if score >= 60:
-        suggestion = "系统综合能力高于基线\n"
-        energy_per_sample = hardware_data.total_energy / test_result.sample_number
+        suggestion = "系统综合能力高于基线。"
+        energy_per_sample = hardware_data['total_energy'] / test_result.sample_number
         base_energy_per_sample = base_hardware_data.total_energy / base_test.sample_number
         if base_energy_per_sample < energy_per_sample:
             per = 100*(energy_per_sample-base_energy_per_sample) / base_energy_per_sample
             per = round(per, 2)
-            suggestion += f"系统能耗高于基线{per}%\n"
+            suggestion += f"系统能耗高于基线{per}%。"
         return Response(
                 {
                     "code": 200,
@@ -271,16 +278,20 @@ def get_score_suggestion(request):
                     "suggestion": suggestion
                 }
             )
-    suggestion = "系统综合能力低于基线\n"
-    if hardware_data.avg_utilization > base_hardware_data.avg_utilization or hardware_data.avg_memory > base_hardware_data.avg_memory:
-        suggestion += "GPU占用过高，建议升级GPU硬件\n"
-    if model_data.avg_vision_time > base_model_data.avg_vision_time:
-        suggestion += "平均视觉处理时间高于基线，建议更换模型视觉编码器\n"
-    if model_data.avg_align_time > base_model_data.avg_align_time:
-        suggestion += "跨模态对齐耗时高于基线，建议提高模型跨模态交互与特征融合的计算效率\n"
-    if model_data.avg_text_gen_time > base_model_data.avg_text_gen_time:
-        suggestion += "平均文本生成时间高于基线，建议更换或改进模型文本解码器\n"
-    energy_per_sample = hardware_data.total_energy / test_result.sample_number
+    suggestion = "系统综合能力低于基线。"
+    if test_result.model_name == base_test.model_name:
+        # if hardware_data['avg_utilization'] > base_hardware_data.avg_utilization or hardware_data['avg_memory'] > base_hardware_data.avg_memory:
+        #     suggestion += "GPU占用过高，建议升级GPU硬件。"
+        if model_data.avg_vision_time > base_model_data.avg_vision_time:
+            suggestion += "处理速度过慢，建议升级GPU硬件。"
+    else:
+        if model_data.avg_vision_time > base_model_data.avg_vision_time:
+            suggestion += "平均视觉处理时间高于基线，建议更换模型视觉编码器。"
+        if model_data.avg_align_time > base_model_data.avg_align_time:
+            suggestion += "跨模态对齐耗时高于基线，建议提高模型跨模态交互与特征融合的计算效率。"
+        if model_data.avg_text_gen_time > base_model_data.avg_text_gen_time:
+            suggestion += "平均文本生成时间高于基线，建议更换或改进模型文本解码器。"
+    energy_per_sample = hardware_data['total_energy'] / test_result.sample_number
     base_energy_per_sample = base_hardware_data.total_energy / base_test.sample_number
     if base_energy_per_sample < energy_per_sample:
         per = 100 * (energy_per_sample - base_energy_per_sample) / base_energy_per_sample
@@ -298,6 +309,7 @@ def get_score_suggestion(request):
 @api_view(['GET'])
 def get_hardware_all(request):
     user_id = cache.get('user.user_id')
+    # user_id = 1
     queryset = TestResult.objects.filter(Q(custom_user=user_id) | Q(custom_user__isnull=True))
     offline = []
     server = []
@@ -305,13 +317,13 @@ def get_hardware_all(request):
     multi_stream = []
     for item in queryset:
         data = {}
-        hardware_data = HardwareData.objects.get(test_result=item.id)
+        hardware_data = HardwareData.objects.filter(test_result=item.id)
         data['id'] = item.id
         data['model_name'] = item.model_name
-        data['hardware_name'] = hardware_data.gpu_name
-        data['avg_utilization'] = hardware_data.avg_utilization
-        data['avg_memory'] = hardware_data.avg_memory
-        data['energy_per_query'] = round(hardware_data.total_energy / item.sample_number, 2)
+        data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
+        data['avg_utilization'] = sum(obj.avg_utilization for obj in hardware_data) / len(hardware_data)
+        data['avg_memory'] = sum(obj.avg_memory for obj in hardware_data)
+        data['energy_per_query'] = round(sum(obj.total_energy for obj in hardware_data) / (item.sample_number), 2)
         if item.test_mode == "Offline":
             offline.append(data)
         elif item.test_mode == "Server":
@@ -320,6 +332,11 @@ def get_hardware_all(request):
             single_stream.append(data)
         elif item.test_mode == "MultiStream":
             multi_stream.append(data)
+        if item.test_time is None:
+            data['test_time'] = "基线"
+        else:
+            local_time = timezone.localtime(item.test_time)
+            data['test_time'] = local_time.strftime("%Y-%m-%d %H:%M:%S")
     return Response(
         {
             "code": 200,
@@ -341,11 +358,11 @@ def get_model_all(request):
     multi_stream = []
     for item in queryset:
         data = {}
-        hardware_data = HardwareData.objects.get(test_result=item.id)
+        hardware_data = HardwareData.objects.filter(test_result=item.id)
         model_data = ModelData.objects.get(test_result=item.id)
         data['id'] = item.id
         data['model_name'] = item.model_name
-        data['hardware_name'] = hardware_data.gpu_name
+        data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
         data['avg_vision_tim'] = model_data.avg_vision_time
         data['avg_align_time'] = model_data.avg_align_time
         data['avg_text_gen_time'] = model_data.avg_text_gen_time
@@ -357,6 +374,11 @@ def get_model_all(request):
             single_stream.append(data)
         elif item.test_mode == "MultiStream":
             multi_stream.append(data)
+        if item.test_time is None:
+            data['test_time'] = "基线"
+        else:
+            local_time = timezone.localtime(item.test_time)
+            data['test_time'] = local_time.strftime("%Y-%m-%d %H:%M:%S")
     return Response(
         {
             "code": 200,
@@ -378,10 +400,10 @@ def get_mode_all(request):
     multi_stream = []
     for item in queryset:
         data = {}
-        hardware_data = HardwareData.objects.get(test_result=item.id)
+        hardware_data = HardwareData.objects.filter(test_result=item.id)
         data['id'] = item.id
         data['model_name'] = item.model_name
-        data['hardware_name'] = hardware_data.gpu_name
+        data['hardware_name'] = hardware_data[0].gpu_name + "*" + str(len(hardware_data))
         data['accuracy'] = item.accuracy
         if item.test_mode == "Offline":
             offline_data = OfflineData.objects.get(test_result=item.id)
@@ -403,6 +425,11 @@ def get_mode_all(request):
             data['ninety_percent_latency'] = multi_stream_data.ninety_percent_latency
             data['stream_num'] = multi_stream_data.stream_num
             multi_stream.append(data)
+        if item.test_time is None:
+            data['test_time'] = "基线"
+        else:
+            local_time = timezone.localtime(item.test_time)
+            data['test_time'] = local_time.strftime("%Y-%m-%d %H:%M:%S")
     return Response(
         {
             "code": 200,

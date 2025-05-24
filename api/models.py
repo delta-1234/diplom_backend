@@ -34,8 +34,6 @@ class TestResult(models.Model):
         null=True,  # 数据库允许存储 NULL
         blank=True,  # 表单验证允许空值
     )
-    # 自动记录创建时间（不可为空）
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "test_result"
